@@ -1,0 +1,50 @@
+# ---------------------------------------------------------------------------
+# STUDENT DATA -- NEVER COMMIT
+# The induction corpus is real, consented student coursework obtained via
+# Dataverse. Redistribution is not ours to grant. Keep it local.
+# ---------------------------------------------------------------------------
+data/*
+!data/README.md
+!data/.gitkeep
+
+*.csv
+*.tsv
+dataverse_files.zip
+**/WrittenInduction*/
+**/Grading Instructions.csv
+online_consent.pdf
+
+# Derived artifacts that embed student text
+chunks*.json
+chunks*.jsonl
+*.index
+*.faiss
+embeddings/
+.cache/
+
+# ---------------------------------------------------------------------------
+# Secrets
+# ---------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.key
+credentials.json
+
+# ---------------------------------------------------------------------------
+# Python
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# ---------------------------------------------------------------------------
+# OS / editor
+# ---------------------------------------------------------------------------
+.DS_Store
+.vscode/
+.idea/
