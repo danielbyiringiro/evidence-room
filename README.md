@@ -27,9 +27,10 @@ suggested deduction, with citations back to source.
 |---|---|
 | Type-aware ingestion + chunking | done |
 | Access-scoped index | done |
-| Embeddings + hybrid retrieval | not started |
-| Stratified evaluation set | not started |
-| Retrieval traces + eval report | not started |
+| Embeddings + hybrid retrieval | done |
+| Permission levels + insufficient-evidence refusal | done |
+| Evaluation set + traces + before/after report | done |
+| Threshold calibration from eval | done |
 
 ## Design notes
 
@@ -57,6 +58,72 @@ question X, exemplars from question Y are never candidates -- their labels were
 assigned against a different claim. Filtering the candidate set rather than
 instructing the model means an out-of-scope chunk cannot be cited even under a
 confused or injected prompt.
+
+**Retrieval is hybrid, and the two families are retrieved differently.** A query
+is scoped -- question Q, rubric item I, the student's proof P -- and the answer
+comes back in two parts. The rubric guidance for item I is fetched by *direct
+lookup* (there are only 7 chunks and they are the same approved rubric for every
+question; vector search over a 7-document set is strictly noisier than
+addressing it by key). Precedent exemplars are retrieved by *hybrid search* over
+the pool scoped to (Q, I): a dense signal (local embeddings) for paraphrase and
+structural similarity, and a sparse signal (BM25) that anchors on the exact
+algebra tokens -- `n+1`, `2^k`, `mod` -- that dense models blur. The two are
+combined with Reciprocal Rank Fusion, which fuses on rank rather than trying to
+reconcile incomparable BM25 and cosine scales. Access scoping is applied to the
+candidate *set* before any scoring, so re-ranking can never resurface an
+out-of-scope exemplar.
+
+**Embeddings run on-machine.** The corpus is consented student coursework whose
+text must not leave the box, so exemplars are embedded locally with fastembed
+(ONNX runtime, no torch) rather than a hosted API. The embedding index is a
+derived artifact containing verbatim student text and is gitignored, like the
+chunk files.
+
+**Permission levels are the access filter applied to the asker.** Two roles:
+`faculty` (grader) sees rubric guidance and graded exemplars; `trainee` sees only
+rubric guidance, because graded exemplars carry verbatim student proof text and a
+named grader's judgment. The gate is enforced pre-retrieval on the candidate set,
+exactly like question scoping -- a family the role cannot see is never a
+candidate, so it can neither surface nor be cited, even under an injected prompt.
+
+**Retrieval returns a decision, not just hits.** It refuses to suggest a
+deduction when the rubric item is unknown, nothing is in scope, the role may not
+see precedent, or no visible exemplar actually resembles the query proof (best
+cosine below a threshold). Refusing beats citing a weak match as if it justified
+a deduction; the weak evidence is still attached to the result so the refusal is
+inspectable in a trace. The similarity threshold (`EVIDENCE_ROOM_MIN_SIM`,
+default **0.65**) is not guessed -- the eval below calibrates it, and re-running
+`evaluate` after a model change resets it.
+
+## Evaluation
+
+`python -m evidence_room.evaluate` runs the eval set through the retriever, logs a
+retrieval trace per case, and writes a **before/after report** to `eval/report.md`
+(before = dense-only, no similarity refusal; after = hybrid + calibrated refusal).
+
+The eval set (`eval/eval_set.jsonl`, 34 cases) spans the four required classes --
+**answerable, unanswerable, conflicting, adversarial** -- across all four
+questions, the seven rubric items, both permission levels, and every refusal
+reason. Its proofs are hand-written, never real student text, so the set is safe
+to commit; the traces (`eval/traces/`, gitignored) log chunk ids/labels/scores
+only.
+
+Metrics are adapted to a retrieval-only, grading-precedent setting: refusal
+quality (answer the answerable, refuse the unanswerable, with over- and
+missed-refusal broken out), label precision/recall@k (does retrieved precedent
+carry the label a correct deduction needs -- a groundedness proxy), conflict
+surfacing (do mixed items return >1 label rather than hiding disagreement), and
+**scope/permission leakage, which must be zero** on every case including the
+adversarial ones. The report also sweeps the refusal threshold and recommends a
+calibrated `EVIDENCE_ROOM_MIN_SIM`, and ends with a failure taxonomy (F1
+over-refusal, F2 missed refusal, F3 wrong-label precedent, F4 duplicate-submission
+crowding, F5 leakage) and the next highest-leverage improvement.
+
+The adversarial cases (prompt injection in the proof text, cross-question
+contamination, role-escalation) are the sharpest test of the design: because
+scoping and permissions filter the *candidate set* pre-retrieval, injected
+instructions in a proof cannot widen what is retrievable -- leakage stays zero
+by construction, not by the model choosing to behave.
 
 ## Known weaknesses
 
@@ -86,10 +153,40 @@ Obtain the corpus (see [`data/README.md`](data/README.md)), then:
 cd src
 python -m evidence_room.ingest --verify     # check corpus is present
 python -m evidence_room.ingest --limit 50   # fast iteration
-python -m evidence_room.ingest              # full index
+python -m evidence_room.ingest              # full index -> chunks_real.jsonl
+```
+
+Then build the dense index and run a scoped query:
+
+```bash
+# embed graded exemplars locally -> embeddings/index.npz (gitignored)
+python -m evidence_room.embeddings --chunks chunks_real.jsonl
+
+# retrieve guidance + precedent for one (question, rubric item, proof)
+python -m evidence_room.retrieval \
+    --question divisibility \
+    --item "Hypothesis is stated" \
+    --proof "Assume 2^k - 1 is divisible by 3 for some k >= 1."
+
+# same query as a trainee -> guidance only, precedent withheld, refused
+python -m evidence_room.retrieval --role trainee \
+    --question divisibility --item "Hypothesis is stated" \
+    --proof "Assume 2^k - 1 is divisible by 3 for some k >= 1."
+```
+
+The query prints a `Decision: ANSWER|REFUSE` line with the confidence and reason.
+`--role` is `faculty` (default) or `trainee`; `--min-sim` overrides the refusal
+threshold for a single query.
+
+Then run the evaluation to produce traces and the before/after report:
+
+```bash
+python -m evidence_room.evaluate     # writes eval/report.md + eval/traces/
 ```
 
 Set `EVIDENCE_ROOM_DATA` to point elsewhere if the corpus lives outside `data/`.
+The embedding model defaults to `BAAI/bge-small-en-v1.5`; override with
+`EVIDENCE_ROOM_EMBED_MODEL`. The index records which model produced it.
 
 ## Data handling
 
@@ -109,14 +206,40 @@ This project differs in what it retrieves *for*: not a final score, but a
 suggested deduction the grader reviews, drawn from a bank that grows during the
 session.
 
+## License & attribution
+
+The **code** in this repository is released under its own terms (see repo
+license). The **dataset** it ingests is licensed separately and is *not*
+distributed here.
+
+**Dataset:** *Written Induction* — mathematical proofs written by students in an
+introductory Discrete Mathematics course learning proof by induction.
+Published via Dataverse. Subject: Mathematical Sciences.
+
+Licensed under [Creative Commons Attribution-NonCommercial 4.0 International
+(CC BY-NC 4.0)](https://creativecommons.org/licenses/by-nc/4.0/). You may share
+and adapt the material for **non-commercial** purposes, provided you give
+appropriate credit, link to the license, and indicate any changes. See
+[`data/README.md`](data/README.md) for the additional consent-based handling
+rules that apply on top of the license.
+
+**Citation:** Poulsen, Seth. 2024. "Student Proof by Induction Data Set."
+Harvard Dataverse. https://doi.org/10.7910/DVN/OTRLXF
+
 ## Layout
 
 ```
 src/evidence_room/
   ingest.py             type-aware chunking, access filter, CLI
-  synthetic_corpus.py   hand-written corpus from the design phase, kept for tests
+  embeddings.py         local fastembed index (exemplars only)
+  retrieval.py          hybrid (dense + BM25) retriever, RRF, roles, refusal
+  evaluate.py           eval harness: traces, metrics, calibration, report
+  embeddings/index.npz  dense index (gitignored, embeds student text)
 data/                   corpus goes here (untracked)
-eval/                   evaluation sets and reports
+eval/
+  eval_set.jsonl        34 cases (answerable/unanswerable/conflicting/adversarial)
+  report.md             before/after report (generated)
+  traces/               retrieval traces (generated, gitignored)
 docs/                   opportunity brief, process map, decision records
 tests/
 ```

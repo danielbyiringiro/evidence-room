@@ -19,8 +19,13 @@ chunks*.json
 chunks*.jsonl
 *.index
 *.faiss
+*.npz
 embeddings/
 .cache/
+
+# Retrieval traces reference real chunk ids; keep them local. The aggregate
+# eval/report.md carries no student text and may be committed.
+eval/traces/
 
 # ---------------------------------------------------------------------------
 # Secrets
