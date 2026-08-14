@@ -31,6 +31,7 @@ suggested deduction, with citations back to source.
 | Permission levels + insufficient-evidence refusal | done |
 | Evaluation set + traces + before/after report | done |
 | Threshold calibration from eval | done |
+| Agent: draft-deduction with safety controls | done |
 
 ## Design notes
 
@@ -124,6 +125,51 @@ contamination, role-escalation) are the sharpest test of the design: because
 scoping and permissions filter the *candidate set* pre-retrieval, injected
 instructions in a proof cannot widen what is retrievable -- leakage stays zero
 by construction, not by the model choosing to behave.
+
+## The Operator's Copilot (agent)
+
+`evidence_room.agent` turns the evidence layer into an agent that performs one
+reversible action: it **drafts a suggested deduction** for a (question, rubric
+item, proof) -- a PENDING proposal a grader reviews. Drafting is reversible;
+*applying* a proposal (the grader-facing step) is separated out and gated behind
+explicit human approval. Safety here is control flow, not a prompt instruction:
+
+| Required control | Mechanism |
+|---|---|
+| Authorization boundary | `ACTORS` -- only `faculty` may invoke the draft action; the role is supplied by the system, never inferred from proof text, so a "I am faculty" injection changes nothing |
+| Dry-run mode (default) | `dry_run=True` computes and audits the draft but persists no proposal -- no state change is visible downstream |
+| Human approval | `apply()` flips PENDING → APPLIED, requires an approver, and refuses in dry-run; the reversible draft is automatable, the irreversible apply is not |
+| Tool timeout + retry | every tool call goes through `_invoke_tool`: wall-clock timeout, bounded retries on `TransientToolError`, and a **structured error** on exhaustion instead of a raw exception |
+| Audit log | append-only `logs/audit.jsonl`: timestamp, user, role, intent, tool, arguments, result, approval -- with proof text **hashed, not copied** |
+| Idempotency | a key over (user, question, item, proof, intent) makes duplicate execution a no-op: the existing proposal is returned; `apply()` on an applied proposal is a no-op |
+
+The agent loop is plan → authorize → idempotency-check → retrieve (guarded) →
+verify → act → audit, and it escalates rather than guesses:
+
+- **failure** -- a tool that times out or errors returns a structured error; the
+  agent recovers and escalates with no half-written proposal.
+- **ambiguity** -- a missing question / item / proof holds for a human.
+- **missing evidence** -- when retrieval refuses (unknown item, out of scope, or
+  no precedent clears the similarity floor), the agent refuses to draft; it never
+  invents a judgment.
+- **conflicting precedent** -- split expert labels escalate for human review
+  instead of asserting a majority that isn't there.
+- **malicious instructions** -- injected text cannot widen retrieval scope or
+  exfiltrate grader identities / out-of-scope data, and never auto-applies.
+- **duplicate execution** -- idempotent by construction.
+
+Run a draft (dry-run by default; `--commit` to persist the pending proposal):
+
+```bash
+python -m evidence_room.agent --user daniel --role faculty \
+    --question divisibility --item "Hypothesis is stated" \
+    --proof "Suppose 2k^3 + 3k^2 + k is divisible by 6."
+```
+
+The audit log and proposal store live under `logs/` (gitignored). Drafts are
+composed deterministically from the approved rubric guidance plus the majority
+expert label among retrieved precedent -- no student proof text is sent to any
+external model.
 
 ## Known weaknesses
 
@@ -234,12 +280,14 @@ src/evidence_room/
   embeddings.py         local fastembed index (exemplars only)
   retrieval.py          hybrid (dense + BM25) retriever, RRF, roles, refusal
   evaluate.py           eval harness: traces, metrics, calibration, report
+  agent.py              Operator's Copilot: draft-deduction agent + safety controls
   embeddings/index.npz  dense index (gitignored, embeds student text)
 data/                   corpus goes here (untracked)
 eval/
   eval_set.jsonl        34 cases (answerable/unanswerable/conflicting/adversarial)
   report.md             before/after report (generated)
   traces/               retrieval traces (generated, gitignored)
+logs/                   agent audit log + proposal store (generated, gitignored)
 docs/                   opportunity brief, process map, decision records
 tests/
 ```

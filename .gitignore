@@ -27,6 +27,10 @@ embeddings/
 # eval/report.md carries no student text and may be committed.
 eval/traces/
 
+# Agent audit log + proposal store: reference real submissions and hashed proof
+# inputs. Local only.
+logs/
+
 # ---------------------------------------------------------------------------
 # Secrets
 # ---------------------------------------------------------------------------
