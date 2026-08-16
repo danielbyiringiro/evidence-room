@@ -32,6 +32,7 @@ suggested deduction, with citations back to source.
 | Evaluation set + traces + before/after report | done |
 | Threshold calibration from eval | done |
 | Agent: draft-deduction with safety controls | done |
+| Cloud delivery: two clouds, one contract (AWS + GCP) | done |
 
 ## Design notes
 
@@ -171,6 +172,19 @@ composed deterministically from the approved rubric guidance plus the majority
 expert label among retrieved precedent -- no student proof text is sent to any
 external model.
 
+## Cloud delivery
+
+[`docs/cloud/`](docs/cloud/) deploys this same agent on **AWS and GCP behind one
+contract** (interface, eval set, security boundary, observability) with Terraform
+skeletons in [`infra/`](infra/). The load-bearing decision is *managed vs
+portable retrieval*, resolved in favour of portable: it keeps consented student
+proof text inside the VPC/project, preserves the type-aware chunking and
+access-scoping, and avoids the always-on managed-vector-store cost floor
+($40-750/mo) that would otherwise dominate at ≤10k weekly tasks. Includes
+architecture diagrams, a STRIDE threat model + IAM matrix, a cost estimate for
+100/1k/10k weekly tasks, and an incident runbook -- see
+[`docs/cloud/README.md`](docs/cloud/README.md).
+
 ## Known weaknesses
 
 - **Severe label imbalance, worsening down the proof.** `Identify Base Case`
@@ -288,6 +302,8 @@ eval/
   report.md             before/after report (generated)
   traces/               retrieval traces (generated, gitignored)
 logs/                   agent audit log + proposal store (generated, gitignored)
+docs/cloud/             two-clouds-one-contract: architecture, threat model, cost, runbook
+infra/                  Terraform skeletons for AWS + GCP (portable design)
 docs/                   opportunity brief, process map, decision records
 tests/
 ```
