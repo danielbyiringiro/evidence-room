@@ -33,6 +33,7 @@ suggested deduction, with citations back to source.
 | Threshold calibration from eval | done |
 | Agent: draft-deduction with safety controls | done |
 | Cloud delivery: two clouds, one contract (AWS + GCP) | done |
+| Specialist model review: learned reranker (verdict: NO-GO, keep baseline) | done |
 
 ## Design notes
 
@@ -185,6 +186,55 @@ architecture diagrams, a STRIDE threat model + IAM matrix, a cost estimate for
 100/1k/10k weekly tasks, and an incident runbook -- see
 [`docs/cloud/README.md`](docs/cloud/README.md).
 
+## Specialization (fine-tuning review)
+
+[`docs/finetune/`](docs/finetune/) runs a **controlled fine-tuning study** against
+the one weakness the eval surfaced (F3: correct-label precedent is usually
+retrieved but not always ranked first). It applies a decision framework
+(prompting vs retrieval vs workflow vs fine-tune), argues that an LLM tune is
+*not* justified here, and tests the cheapest intervention that could help -- a
+learned reranker over retrieval features -- against a **frozen holdout** with a
+pre-registered hypothesis, bootstrap confidence intervals, error slices, a
+latency/cost comparison, and a rollback plan
+([`specialize.py`](src/evidence_room/specialize.py)). Reranking only reorders an
+already scope/permission-filtered candidate set, so leakage stays 0 by
+construction.
+
+**What it does.** Splits the corpus by submission (60/20/20), holds the test
+submissions out of the retrieval pool entirely, and **freezes** them to
+`test_manifest.json`. Builds (query, candidate) pairs with a target of "candidate
+label == query gold label" and features from the retrieval signals (dense cosine,
+BM25, ranks, candidate-label indicators, scope label prior -- never the query's
+gold label). Selects a logistic-regression reranker's hyperparameters on
+**validation**, evaluates once on the frozen **test**, and writes
+`model-review.md` + a `registry.jsonl` entry. The go/no-go rule is pre-registered
+(`TARGET_DELTA`, `LATENCY_BUDGET_MS`, `SLICE_TOLERANCE`) so the verdict can't be
+cherry-picked.
+
+**Verdict: NO-GO -- keep the RRF baseline** (bge-small-en-v1.5, 2,034 submissions,
+5,131 frozen-test queries). The reranker does not beat the baseline; it *hurts*:
+P@1 label agreement **0.752 → 0.645** (Δ **−0.107**, 95% CI [−0.119, −0.095]),
+recall@5 **0.914 → 0.705**, at negligible latency. Every rubric item and every
+label slice regresses (the scarce `partial` slice collapses to 0.000). Even the
+best config *on validation* (0.647) trailed the baseline, so this is "no config
+beats baseline," not a bad-config artifact. Mechanically, pointwise logistic
+regression optimizes match-classification, not ranking, and the `balanced`
+weighting selected on validation tilts it toward the rare `partial` class, which
+inverts the order.
+
+**Why this is the right outcome.** The baseline is already strong and the residual
+F3 errors are not fixable by a cheap linear reranker over these features. Per the
+pre-registered framework this does **not** escalate to the deferred embedding LoRA
+(the rule was to escalate only if the reranker showed a capturable ordering signal
+in a *helpful* direction -- it showed the opposite). The evidence says *don't
+tune*; ship the baseline, which is registered as `v0`. The one honest limit: this
+rules out *this* reranker (pointwise LR over these features), not every possible
+reranker -- a proper pairwise/listwise ranker (e.g. LambdaMART) would be the fair
+next iteration if someone insisted.
+
+Reproduce: `python -m evidence_room.specialize` (needs the embedding index +
+`scikit-learn`; the frozen test set is created on first run and reused).
+
 ## Known weaknesses
 
 - **Severe label imbalance, worsening down the proof.** `Identify Base Case`
@@ -290,20 +340,41 @@ Harvard Dataverse. https://doi.org/10.7910/DVN/OTRLXF
 
 ```
 src/evidence_room/
-  ingest.py             type-aware chunking, access filter, CLI
-  embeddings.py         local fastembed index (exemplars only)
-  retrieval.py          hybrid (dense + BM25) retriever, RRF, roles, refusal
-  evaluate.py           eval harness: traces, metrics, calibration, report
-  agent.py              Operator's Copilot: draft-deduction agent + safety controls
-  embeddings/index.npz  dense index (gitignored, embeds student text)
-data/                   corpus goes here (untracked)
+  ingest.py              type-aware chunking, access filter, CLI
+  embeddings.py          local fastembed index (exemplars only)
+  retrieval.py           hybrid (dense + BM25) retriever, RRF, roles, refusal
+  evaluate.py            eval harness: traces, metrics, calibration, report
+  agent.py               Operator's Copilot: draft-deduction agent + safety controls
+  specialize.py          specialist model review: learned reranker + frozen-test study
+  embeddings/index.npz   dense index (generated, gitignored -- embeds student text)
+
+data/                    corpus goes here (untracked; see data/README.md)
+
 eval/
-  eval_set.jsonl        34 cases (answerable/unanswerable/conflicting/adversarial)
-  report.md             before/after report (generated)
-  traces/               retrieval traces (generated, gitignored)
-logs/                   agent audit log + proposal store (generated, gitignored)
-docs/cloud/             two-clouds-one-contract: architecture, threat model, cost, runbook
-infra/                  Terraform skeletons for AWS + GCP (portable design)
-docs/                   opportunity brief, process map, decision records
+  eval_set.jsonl         34 cases (answerable/unanswerable/conflicting/adversarial)
+  report.md              before/after retrieval report (generated)
+  traces/                retrieval traces (generated, gitignored)
+
+logs/                    agent audit log + proposal store (generated, gitignored)
+
+docs/
+  opportunity-brief.md   the problem + process map
+  cloud/                 two-clouds-one-contract: contract, architecture,
+                         threat-model, cost-estimate, runbook (Days 3-4)
+  finetune/              specialist model review (Day 4)
+    README.md            decision framework + pre-registered hypothesis
+    dataset.md           schema, splits, leakage controls, provenance
+    model-review.md      generated go/no-go verdict (NO-GO: keep baseline)
+    registry.jsonl       model registry: metrics + decision per run (generated)
+    test_manifest.json   frozen test submission ids (generated on first run)
+
+infra/                   Terraform skeletons for AWS + GCP, portable design
+  aws/ , gcp/            least-privilege IAM, storage, compute, observability
+
 tests/
+  test_ingest.py         chunking + access-scoping invariants
+  test_retrieval.py      hybrid retrieval, roles, refusal
+  test_evaluate.py       eval metrics, calibration, leakage
+  test_agent.py          agent gate scenarios + safety controls
+  test_specialize.py     leakage-safe splits, reranker, CI, go/no-go
 ```
